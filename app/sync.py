@@ -20,6 +20,9 @@ DEMO_LINK = re.compile(r"easypanel\.host", re.IGNORECASE)
 # Un envío con precios / propuesta cuenta como cotización.
 PRICE_WORDS = re.compile(r"\$\s?\d|cotiza|propuesta", re.IGNORECASE)
 DEMO_MEDIA = ("imagen", "documento")
+# Un saludo automático del negocio llega en segundos tras nuestro primer mensaje.
+# No cuenta como «se interesó» (ver `derive_dates`).
+AUTO_ACK_SECONDS = 60
 
 
 def norm(s):
@@ -72,7 +75,10 @@ def _iso(ts):
 def derive_dates(msgs):
     """Deduce las tres fechas de un hilo, mezclando mensajes de WAHA y filas de SQLite.
 
-    - interesado_el: instante del PRIMER mensaje entrante (fromMe=false) del hilo.
+    - interesado_el: instante del PRIMER mensaje entrante (fromMe=false) del hilo. Se
+      descarta el saludo automático del negocio (autorespuesta que llega en segundos
+      tras nuestro primer mensaje) cuando hay un mensaje entrante posterior: el cliente
+      «se interesó» cuando escribió de verdad, no cuando contestó su robot.
     - demo_enviado_el: primer envío nuestro con multimedia (imagen/documento) y enlace
       easypanel.host; si no hay enlace, el primer envío de imagen/documento.
     - cotizacion_enviada_el: primer envío nuestro con precios / «cotiza» / «propuesta».
@@ -89,7 +95,20 @@ def derive_dates(msgs):
             mt = media_label(m) if (m.get("hasMedia") or m.get("has_media")) else None
         (outs if fm else ins).append((int(ts), body, mt))
 
-    interesado = min((t for t, _b, _m in ins), default=None)
+    in_ts = [t for t, _b, _m in ins]
+    out_ts = [t for t, _b, _m in outs]
+
+    def _auto_ack(t_in):
+        prev = [t for t in out_ts if t <= t_in]
+        if not prev or t_in - max(prev) > AUTO_ACK_SECONDS:
+            return False
+        # solo se descarta si hay un entrante posterior que represente el interés real
+        return any(t > t_in for t in in_ts)
+
+    human_in = [t for t in in_ts if not _auto_ack(t)]
+    interesado = min(human_in, default=None)
+    if interesado is None:
+        interesado = min(in_ts, default=None)
     with_link = [t for t, b, m in outs if m in DEMO_MEDIA and DEMO_LINK.search(b)]
     media_only = [t for t, _b, m in outs if m in DEMO_MEDIA]
     demo = min(with_link) if with_link else (min(media_only) if media_only else None)
@@ -103,12 +122,42 @@ def derive_dates(msgs):
     }
 
 
+def _chat_id_from_key(key):
+    """Saca el id de chat de una clave de la tabla `clientes`.
+
+    Admite el id desnudo («506...@c.us») y el formato antiguo «chat:<linea>:<chatId>».
+    Devuelve None para claves de lead («lead:<id>») o que no son un chat.
+    """
+    if not key:
+        return None
+    if key.startswith("lead:"):
+        return None
+    if key.startswith("chat:"):
+        partes = key.split(":", 2)
+        key = partes[2] if len(partes) == 3 else key
+    return key if "@" in key else None
+
+
 def autofill_dates():
-    """Rellena las fechas deducidas para cada conversación de prospecto, sin pisar lo
-    que ya haya (ni lo curado desde fuera ni lo que Joel fijó a mano)."""
+    """Rellena las fechas deducidas de CADA conversación que exista, sin pisar lo
+
+    que ya haya (ni lo curado desde fuera ni lo que Joel fijó a mano). Incluye tanto
+    las conversaciones de prospecto/lead como las que tienen una fila curada en
+    `clientes` (p. ej. un cliente empujado desde fuera al que le mandamos el demo).
+    """
     rows = store.query(
         "SELECT DISTINCT id, line FROM chats WHERE is_prospect=1 OR lead_id IS NOT NULL"
     )
+    vistos = {(r["id"], r["line"]) for r in rows}
+    rows = list(rows)
+    for r in store.query("SELECT key FROM clientes"):
+        cid = _chat_id_from_key(r["key"])
+        if not cid:
+            continue
+        for ch in store.query("SELECT id, line FROM chats WHERE id=?", (cid,)):
+            if (ch["id"], ch["line"]) not in vistos:
+                vistos.add((ch["id"], ch["line"]))
+                rows.append(ch)
     n = 0
     for r in rows:
         msgs = store.query(

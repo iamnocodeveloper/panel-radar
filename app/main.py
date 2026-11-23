@@ -99,14 +99,31 @@ def fmt_full(ts):
     return datetime.fromtimestamp(int(ts), EC).strftime("%d/%m/%Y %H:%M")
 
 
+def _as_ec(dt):
+    """Normaliza un datetime a hora de Ecuador (UTC-5) SIN doble conversión.
+
+    - Si trae zona (aware) se convierte una sola vez con astimezone.
+    - Si es naive se interpreta como que YA está en hora de Ecuador y no se le
+      resta nada (restarle 5 h otra vez es justo el desfase de un día).
+    """
+    if dt.tzinfo is None:
+        return dt.replace(tzinfo=EC)
+    return dt.astimezone(EC)
+
+
 def fmt_fecha(v):
-    """Formatea una fecha ISO (con o sin hora) curada o deducida."""
+    """Formatea una fecha ISO (con o sin hora) curada o deducida, en hora de Ecuador.
+
+    Acepta cualquier representación (con `-05:00`, `+00:00`, `Z` o sin zona) y
+    siempre la muestra en UTC-5 una sola vez.
+    """
     if not v:
         return None
     try:
-        dt = datetime.fromisoformat(v)
+        dt = datetime.fromisoformat(str(v).replace("Z", "+00:00"))
     except Exception:  # noqa: BLE001
         return v
+    dt = _as_ec(dt)
     return dt.strftime("%d/%m %H:%M") if "T" in v else dt.strftime("%d/%m/%Y")
 
 
@@ -262,15 +279,100 @@ def _cliente_embed(cli):
     }
 
 
+def _chat_id_de_clave(key):
+    """Id de chat de una clave de `clientes` (admite «<chatId>» y «chat:<linea>:<chatId>»)."""
+    if not key or key.startswith("lead:"):
+        return None
+    if key.startswith("chat:"):
+        partes = key.split(":", 2)
+        key = partes[2] if len(partes) == 3 else key
+    return key if "@" in key else None
+
+
+def _dedupe_cards(cards):
+    """Una sola tarjeta por cliente (chat), aunque tenga conversación en dos líneas.
+
+    Fusiona las fechas (la más temprana no nula), la nota y el estado más avanzado, y
+    conserva la conversación más reciente.
+    """
+    grupos, orden = {}, []
+    for c in cards:
+        cv = c.get("conversacion") or {}
+        ck = c.get("cliente_key") or ""
+        if cv.get("chat_id"):
+            k = "chat:" + cv["chat_id"]
+        elif "@" in ck:
+            k = "chat:" + ck
+        elif c.get("lead_id"):
+            k = "lead:" + c["lead_id"]
+        else:
+            k = c.get("key") or str(id(c))
+        if k not in grupos:
+            grupos[k] = []
+            orden.append(k)
+        grupos[k].append(c)
+
+    out = []
+    for k in orden:
+        g = grupos[k]
+        if len(g) == 1:
+            out.append(g[0])
+            continue
+
+        def primero(f):
+            for c in g:
+                if c.get(f) not in (None, ""):
+                    return c[f]
+            return None
+
+        def mas_temprano(f):
+            vals = [c[f] for c in g if c.get(f) not in (None, "")]
+            return min(vals) if vals else None
+
+        rep = max(g, key=lambda c: ((c.get("conversacion") or {}).get("ultimo_ts") or 0))
+        base = dict(rep)
+        estados = [c.get("estado") for c in g if c.get("estado")]
+        if estados:
+            base["estado"] = max(estados, key=lambda e: 99 if e in TERMINALES else RANK.get(e, 0))
+        for f in ("nombre", "zona", "tipo", "nota", "estado_extra", "radar_estado", "lead_id", "mensajes_enviados"):
+            v = primero(f)
+            if v is not None:
+                base[f] = v
+        # clave editable: preferir el id de chat, para que editar caiga en la misma fila
+        base["cliente_key"] = next(
+            (c["cliente_key"] for c in g if "@" in (c.get("cliente_key") or "")), base.get("cliente_key")
+        )
+        for el, fm in (
+            ("interesado_el", "interesado_fmt"),
+            ("demo_enviado_el", "demo_fmt"),
+            ("cotizacion_enviada_el", "cotizacion_fmt"),
+        ):
+            e = mas_temprano(el)
+            base[el] = e
+            base[fm] = fmt_fecha(e)
+        base["conversacion"] = rep.get("conversacion")
+        out.append(base)
+    return out
+
+
 def build_kanban():
-    chats = store.query("SELECT * FROM chats WHERE is_prospect=1 OR lead_id IS NOT NULL")
     allc = store.cliente_all()
+    chats = store.query("SELECT * FROM chats WHERE is_prospect=1 OR lead_id IS NOT NULL")
+    # Incluye también las conversaciones que solo existen como dato curado en `clientes`
+    # (cliente empujado desde fuera): así su tarjeta muestra el hilo y sus fechas.
+    ids_curados = sorted({i for i in (_chat_id_de_clave(k) for k in allc) if i})
+    if ids_curados:
+        marcas = ",".join("?" * len(ids_curados))
+        ya = {(c["id"], c["line"]) for c in chats}
+        for c in store.query("SELECT * FROM chats WHERE id IN (%s)" % marcas, ids_curados):
+            if (c["id"], c["line"]) not in ya:
+                chats.append(c)
     by_lead = {}
     unmatched = []
     for ch in chats:
         if ch.get("lead_id"):
             by_lead.setdefault(ch["lead_id"], []).append(ch)
-        elif ch.get("is_prospect"):
+        else:
             unmatched.append(ch)
 
     zones = set()
@@ -308,6 +410,7 @@ def build_kanban():
     for ch in unmatched:
         cli = allc.get(ch["id"]) or {}
         consumed.add(ch["id"])
+        consumed.add(f"chat:{ch['line']}:{ch['id']}")
         zones.add("—")
         card = {
             "key": f"chat:{ch['line']}:{ch['id']}",
@@ -344,6 +447,7 @@ def build_kanban():
         card.update(_cliente_embed(cli))
         cards.append(card)
 
+    cards = _dedupe_cards(cards)
     cards.sort(key=lambda c: (-(((c["conversacion"] or {}).get("ultimo_ts") or 0)), (c["nombre"] or "").lower()))
 
     counts = {e: 0 for e in ESTADOS}
@@ -562,7 +666,7 @@ def api_health():
     return {
         "status": "ok",
         "last_refresh": store.get_meta("last_refresh"),
-        "version": "1.3.0",
+        "version": "1.3.1",
         "auth_configurada": bool(config.PANEL_PASS),
         "ingest_configurada": bool(config.ingest_key()),
         "arrancado_en": ARRANCADO_EN,
