@@ -275,12 +275,16 @@ def build_kanban():
 
     zones = set()
     cards = []
+    consumed = set()
     for l in store.query("SELECT * FROM leads"):
         lead_chats = sorted(by_lead.get(l["id"], []), key=lambda c: c.get("last_ts") or 0, reverse=True)
         rep = lead_chats[0] if lead_chats else None
         responded = any(c.get("responded") for c in lead_chats)
         rows = [allc.get(c["id"]) for c in lead_chats] + [allc.get(f"lead:{l['id']}")]
         cli = _merge_clientes(rows)
+        consumed.add(f"lead:{l['id']}")
+        for c in lead_chats:
+            consumed.add(c["id"])
         # clave editable: el chat que ya tenga datos propios, o el más reciente, o el lead
         ckey = next((c["id"] for c in lead_chats if allc.get(c["id"])), None)
         ckey = ckey or (rep["id"] if rep else f"lead:{l['id']}")
@@ -303,6 +307,7 @@ def build_kanban():
 
     for ch in unmatched:
         cli = allc.get(ch["id"]) or {}
+        consumed.add(ch["id"])
         zones.add("—")
         card = {
             "key": f"chat:{ch['line']}:{ch['id']}",
@@ -315,6 +320,26 @@ def build_kanban():
             "radar_estado": None,
             "mensajes_enviados": None,
             "conversacion": _chat_embed(ch),
+        }
+        card.update(_cliente_embed(cli))
+        cards.append(card)
+
+    # Clientes curados que aún no cruzan con ningún lead ni conversación conocida: se
+    # muestran igual (es justo el caso «empujar desde fuera a este le enviámos el demo»).
+    for key, cli in allc.items():
+        if key in consumed:
+            continue
+        card = {
+            "key": f"cli:{key}",
+            "cliente_key": key,
+            "lead_id": None,
+            "nombre": cli.get("nombre") or key,
+            "zona": None,
+            "tipo": None,
+            "estado": effective_col("nuevo", False, cli),
+            "radar_estado": None,
+            "mensajes_enviados": None,
+            "conversacion": None,
         }
         card.update(_cliente_embed(cli))
         cards.append(card)
@@ -725,6 +750,13 @@ async def api_cliente_extra(key: str, request: Request):
     store.cliente_set(key, vals)
     cli = store.cliente_get(key) or {}
     return {"ok": True, "cliente": {**_cliente_embed(cli), "cliente_key": key}}
+
+
+@app.post("/api/cliente/{key}/delete")
+async def api_cliente_delete(key: str):
+    """Borra los datos propios del panel de un cliente (no toca Radar ni WhatsApp)."""
+    store.cliente_delete(key)
+    return {"ok": True, "cliente_key": key}
 
 
 @app.post("/api/ingest")

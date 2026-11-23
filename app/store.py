@@ -195,3 +195,10 @@ def cliente_set(key, values):
         row[f] = values[f] if f in values else cur.get(f)
     _cliente_write(key, row)
     return cliente_get(key)
+
+
+def cliente_delete(key):
+    if not key:
+        return False
+    execute("DELETE FROM clientes WHERE key=?", (key,))
+    return True
