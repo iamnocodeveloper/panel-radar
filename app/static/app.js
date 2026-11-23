@@ -284,7 +284,7 @@ function renderGraficos() {
 
   // 1. Embudo
   const fu = g.embudo, ftop = fu[0] ? fu[0].n : 0;
-  html += `<div class="card" style="margin-top:16px"><h3>${ICON.funnel}Embudo de prospección</h3>
+  html += `<div class="card" style="margin-top:16px"><h3>${ICON.funnel}Embudo de prospección<span style="color:var(--dim);font-weight:400;font-size:12px;margin-left:auto">acumulado de toda la cartera (no del período)</span></h3>
     <div class="body"><div class="funnel">` + fu.map((s, i) => {
       const w = ftop ? Math.max(2, Math.round((s.n / ftop) * 100)) : 0;
       const conv = i === 0 ? "" : `${s.n} de ${fu[i - 1].n} · ${pct(s.pct_prev)} del paso anterior`;
