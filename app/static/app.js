@@ -48,7 +48,7 @@ function renderResumen() {
   const envTotal = Object.values(r.enviados_hoy).reduce((a, b) => a + b, 0);
   const respTotal = Object.values(r.respuestas_hoy).reduce((a, b) => a + b, 0);
   const kpis = [
-    ["Enviados hoy", envTotal, "acc", ICON.send, Object.entries(r.enviados_hoy).map(([k, v]) => k + ": " + v).join(" · ")],
+    ["Enviados hoy", envTotal, "acc", ICON.send, Object.entries(r.enviados_hoy).map(([k, v]) => k + ": " + v).join(" · ") + (r.radar.sentTodayNew != null ? ` · Radar: ${r.radar.sentTodayNew}` : "")],
     ["Respuestas hoy", respTotal, "ok", ICON.in, "mensajes recibidos de clientes"],
     ["Esperando respuesta", r.esperando_respuesta, "warn", ICON.wait, "sin contestar todavía"],
     ["Tasa de respuesta", pct(r.tasa_respuesta), "", ICON.check, `${r.prospectos_respondieron} de ${r.prospectos_contactados} prospectos`],
