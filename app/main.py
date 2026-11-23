@@ -666,7 +666,7 @@ def api_health():
     return {
         "status": "ok",
         "last_refresh": store.get_meta("last_refresh"),
-        "version": "1.3.1",
+        "version": "1.3.2",
         "auth_configurada": bool(config.PANEL_PASS),
         "ingest_configurada": bool(config.ingest_key()),
         "arrancado_en": ARRANCADO_EN,

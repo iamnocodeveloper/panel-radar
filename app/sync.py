@@ -293,14 +293,24 @@ def _sync_line(line):
         return
 
     # Solo hilos de chats que escribimos o con actividad reciente (evita personales antiguos).
+    # Ojo: WAHA a veces deja `conversationTimestamp` en None (p. ej. chats contactados por
+    # API): en ese caso la recencia se mide con el timestamp del último mensaje, que es lo
+    # que de verdad importa. Y un chat curado en `clientes` siempre se sincroniza.
     now_ts = store.now()
     existing = {r["id"]: r for r in store.query("SELECT id, threaded FROM chats WHERE line=?", (name,))}
+    curados = {c["key"] for c in store.query("SELECT key FROM clientes")}
     candidates = []
     for chat in overview:
         lm = chat.get("lastMessage") or {}
         cid = chat.get("id")
-        recent = (chat.get("conversationTimestamp") or 0) > now_ts - 45 * 86400
-        if lm.get("fromMe") or recent or existing.get(cid, {}).get("is_prospect"):
+        last_act = lm.get("timestamp") or chat.get("conversationTimestamp") or 0
+        recent = last_act > now_ts - 45 * 86400
+        if (
+            lm.get("fromMe")
+            or recent
+            or existing.get(cid, {}).get("is_prospect")
+            or cid in curados
+        ):
             candidates.append(chat)
 
     def fetch(chat):
