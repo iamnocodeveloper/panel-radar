@@ -15,6 +15,12 @@ MEDIA_LABEL = {
     "text": "texto",
 }
 
+# Un enlace a una demo publicada por nosotros lleva el dominio de EasyPanel.
+DEMO_LINK = re.compile(r"easypanel\.host", re.IGNORECASE)
+# Un envío con precios / propuesta cuenta como cotización.
+PRICE_WORDS = re.compile(r"\$\s?\d|cotiza|propuesta", re.IGNORECASE)
+DEMO_MEDIA = ("imagen", "documento")
+
 
 def norm(s):
     s = unicodedata.normalize("NFKD", s or "").encode("ascii", "ignore").decode()
@@ -43,6 +49,80 @@ def _phones(chat_id):
     num = re.sub(r"\D", "", num)
     last4 = num[-4:] if len(num) >= 4 else num
     return num, last4
+
+
+# --------------------------------------------------------------- fechas por cliente
+
+_EC = None
+
+
+def _iso(ts):
+    global _EC
+    if not ts:
+        return None
+    if _EC is None:
+        from datetime import timedelta, timezone
+
+        _EC = timezone(timedelta(seconds=config.TZ_OFFSET))
+    from datetime import datetime
+
+    return datetime.fromtimestamp(int(ts), _EC).isoformat()
+
+
+def derive_dates(msgs):
+    """Deduce las tres fechas de un hilo, mezclando mensajes de WAHA y filas de SQLite.
+
+    - interesado_el: instante del PRIMER mensaje entrante (fromMe=false) del hilo.
+    - demo_enviado_el: primer envío nuestro con multimedia (imagen/documento) y enlace
+      easypanel.host; si no hay enlace, el primer envío de imagen/documento.
+    - cotizacion_enviada_el: primer envío nuestro con precios / «cotiza» / «propuesta».
+    """
+    ins, outs = [], []
+    for m in msgs:
+        ts = m.get("ts") if "ts" in m else m.get("timestamp")
+        if not ts:
+            continue
+        fm = m.get("from_me") if "from_me" in m else m.get("fromMe")
+        body = m.get("body") or ""
+        mt = m.get("media_type")
+        if mt is None:
+            mt = media_label(m) if (m.get("hasMedia") or m.get("has_media")) else None
+        (outs if fm else ins).append((int(ts), body, mt))
+
+    interesado = min((t for t, _b, _m in ins), default=None)
+    with_link = [t for t, b, m in outs if m in DEMO_MEDIA and DEMO_LINK.search(b)]
+    media_only = [t for t, _b, m in outs if m in DEMO_MEDIA]
+    demo = min(with_link) if with_link else (min(media_only) if media_only else None)
+    cot = [t for t, b, _m in outs if PRICE_WORDS.search(b)]
+    cotizacion = min(cot) if cot else None
+
+    return {
+        "interesado_el": _iso(interesado),
+        "demo_enviado_el": _iso(demo),
+        "cotizacion_enviada_el": _iso(cotizacion),
+    }
+
+
+def autofill_dates():
+    """Rellena las fechas deducidas para cada conversación de prospecto, sin pisar lo
+    que ya haya (ni lo curado desde fuera ni lo que Joel fijó a mano)."""
+    rows = store.query(
+        "SELECT DISTINCT id, line FROM chats WHERE is_prospect=1 OR lead_id IS NOT NULL"
+    )
+    n = 0
+    for r in rows:
+        msgs = store.query(
+            "SELECT ts, from_me, body, media_type FROM messages "
+            "WHERE chat_id=? AND line=? ORDER BY ts ASC",
+            (r["id"], r["line"]),
+        )
+        if not msgs:
+            continue
+        derived = derive_dates(msgs)
+        if any(derived.values()):
+            store.cliente_upsert(r["id"], derived, overwrite=False)
+            n += 1
+    return n
 
 
 # --------------------------------------------------------------- Radar
@@ -281,13 +361,14 @@ def refresh():
         return {"ok": False, "reason": "ya en curso"}
     store.set_meta("refreshing", "1")
     t0 = time.time()
-    out = {"ok": True}
+    out = {"ok": True}  # type: dict
     try:
         out["resumen"] = sync_radar()
         with ThreadPoolExecutor(max_workers=2) as ex:
             list(ex.map(_sync_line, config.lines()))
         match_leads()
         store.execute("UPDATE chats SET is_prospect=1 WHERE lead_id IS NOT NULL")
+        out["fechas"] = autofill_dates()
         store.set_meta("last_refresh", store.now())
         out["elapsed"] = round(time.time() - t0, 1)
     except Exception as e:  # noqa: BLE001

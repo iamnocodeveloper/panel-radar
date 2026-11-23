@@ -56,6 +56,19 @@ CREATE TABLE IF NOT EXISTS leads(
   updated_at INTEGER
 );
 CREATE TABLE IF NOT EXISTS meta(key TEXT PRIMARY KEY, value TEXT);
+-- Datos propios del panel (no existen en Radar): estados finos, notas y las tres
+-- fechas curadas/deducidas por cliente. La clave es el id de chat de WAHA
+-- («506...@c.us») o, para un lead sin conversación, «lead:<id>».
+CREATE TABLE IF NOT EXISTS clientes(
+  key TEXT PRIMARY KEY,
+  nombre TEXT,
+  interesado_el TEXT,
+  demo_enviado_el TEXT,
+  cotizacion_enviada_el TEXT,
+  estado_extra TEXT,
+  nota TEXT,
+  updated_at INTEGER
+);
 """
 
 
@@ -100,3 +113,85 @@ def get_meta(key, default=None):
 
 def now():
     return int(time.time())
+
+
+# --------------------------------------------------------------- clientes (datos del panel)
+
+CLIENTE_FIELDS = (
+    "nombre",
+    "interesado_el",
+    "demo_enviado_el",
+    "cotizacion_enviada_el",
+    "estado_extra",
+    "nota",
+)
+
+
+def cliente_get(key):
+    if not key:
+        return None
+    rows = query("SELECT * FROM clientes WHERE key=?", (key,))
+    return rows[0] if rows else None
+
+
+def cliente_all():
+    return {r["key"]: r for r in query("SELECT * FROM clientes")}
+
+
+def _cliente_write(key, row):
+    execute(
+        """INSERT INTO clientes(key,nombre,interesado_el,demo_enviado_el,cotizacion_enviada_el,
+                estado_extra,nota,updated_at)
+           VALUES(:key,:nombre,:interesado_el,:demo_enviado_el,:cotizacion_enviada_el,
+                :estado_extra,:nota,:updated_at)
+           ON CONFLICT(key) DO UPDATE SET
+                nombre=excluded.nombre, interesado_el=excluded.interesado_el,
+                demo_enviado_el=excluded.demo_enviado_el,
+                cotizacion_enviada_el=excluded.cotizacion_enviada_el,
+                estado_extra=excluded.estado_extra, nota=excluded.nota,
+                updated_at=excluded.updated_at""",
+        row,
+    )
+
+
+def cliente_upsert(key, values, overwrite=True):
+    """Upsert por clave. Nunca borra lo que ya había si el campo viene vacío.
+
+    overwrite=True  -> un valor nuevo no vacío reemplaza al anterior (ingesta curada).
+    overwrite=False -> solo rellena campos que estaban vacíos (fechas deducidas de WAHA).
+    """
+    if not key:
+        return False
+    cur = cliente_get(key) or {}
+    row = {"key": key, "updated_at": now()}
+    changed = False
+    for f in CLIENTE_FIELDS:
+        old = cur.get(f)
+        new = values.get(f)
+        if new in (None, ""):
+            row[f] = old
+        elif overwrite or old in (None, ""):
+            row[f] = new
+            changed = changed or (new != old)
+        else:
+            row[f] = old
+    if cur:
+        row["key"] = key
+        _cliente_write(key, row)
+        return True
+    if not any(row.get(f) not in (None, "") for f in CLIENTE_FIELDS):
+        return False  # nada que crear
+    _cliente_write(key, row)
+    return True
+
+
+def cliente_set(key, values):
+    """Escritura manual: solo escribe las claves presentes en `values` (permite vaciar)."""
+    if not key:
+        return None
+    cur = cliente_get(key) or {}
+    row = {"key": key, "updated_at": now()}
+    for f in CLIENTE_FIELDS:
+        row[f] = values[f] if f in values else cur.get(f)
+    _cliente_write(key, row)
+    return cliente_get(key)
