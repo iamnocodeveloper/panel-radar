@@ -395,7 +395,7 @@ def build_graficos(dias=30):
             fun["cliente"] += 1
 
     pasos = [
-        ("Enviados", fun["enviados"]),
+        ("Enviados (prospectos)", fun["enviados"]),
         ("Respondidos", fun["respondidos"]),
         ("Interesados", fun["interesados"]),
         ("Demo enviado", fun["demo"]),
@@ -426,54 +426,79 @@ def build_graficos(dias=30):
 
     msgs = store.query("SELECT chat_id,line,from_me,ts FROM messages WHERE ts>=?", (desde,))
 
+    # Volumen diario de mensajes (barras del gráfico de evolución).
     env_dia = {d: 0 for d in dias_lista}
     rec_dia = {d: 0 for d in dias_lista}
-    env_hora = {i: 0 for i in range(12)}  # bloques de 2 h (últimos 30 días)
-    rec_hora = {i: 0 for i in range(12)}
-    env_dow = {d: 0 for d in range(7)}
-    rec_dow = {d: 0 for d in range(7)}
-    env_linea = {ln["nombre"]: 0 for ln in config.lines()}
-    rec_linea = {ln["nombre"]: 0 for ln in config.lines()}
-    zona_stat = {}
-    tipo_stat = {}
-
     for m in msgs:
-        ts = m["ts"]
-        if ts >= inicio:
-            d = day_ec(ts)
+        if m["ts"] >= inicio:
+            d = day_ec(m["ts"])
             if d in env_dia:
                 (env_dia if m["from_me"] else rec_dia)[d] += 1
-        if ts >= rango30:
-            dt = datetime.fromtimestamp(ts, EC)
-            hb = dt.hour // 2
-            (env_hora if m["from_me"] else rec_hora)[hb] += 1
-            dw = dt.weekday()
-            (env_dow if m["from_me"] else rec_dow)[dw] += 1
-            if m["from_me"]:
-                env_linea[m["line"]] = env_linea.get(m["line"], 0) + 1
-            else:
-                rec_linea[m["line"]] = rec_linea.get(m["line"], 0) + 1
-            zona, tipo = chat_meta.get((m["chat_id"], m["line"]), (None, None))
-            if zona:
-                z = zona_stat.setdefault(zona, [0, 0])
-                z[0 if m["from_me"] else 1] += 1
-            if tipo:
-                t = tipo_stat.setdefault(tipo, [0, 0])
-                t[0 if m["from_me"] else 1] += 1
+
+    # Cohorte de prospectos: cada conversación se atribuye al bloque de su PRIMER mensaje
+    # nuestro. Así la «tasa de respuesta» es «de los que contacté en X, cuántos
+    # respondieron» (≤100%), no un cociente de mensajes que puede pasar del 100%.
+    responded = {
+        (c["id"], c["line"]): 1 if c.get("responded") else 0
+        for c in store.query("SELECT id,line,responded FROM chats")
+    }
+    fo_rows = store.query(
+        "SELECT chat_id,line,MIN(ts) fo FROM messages WHERE from_me=1 GROUP BY chat_id,line"
+    )
+
+    env_hora = {i: 0 for i in range(12)}
+    resp_hora = {i: 0 for i in range(12)}
+    env_dow = {d: 0 for d in range(7)}
+    resp_dow = {d: 0 for d in range(7)}
+    env_linea = {ln["nombre"]: 0 for ln in config.lines()}
+    resp_linea = {ln["nombre"]: 0 for ln in config.lines()}
+    env_dia_coh = {d: 0 for d in dias_lista}
+    resp_dia_coh = {d: 0 for d in dias_lista}
+    zona_stat = {}
+    tipo_stat = {}
+    for r in fo_rows:
+        fo = r["fo"]
+        if not fo or fo < rango30:
+            continue
+        key = (r["chat_id"], r["line"])
+        resp = responded.get(key, 0)
+        dt = datetime.fromtimestamp(fo, EC)
+        hb = dt.hour // 2
+        env_hora[hb] += 1
+        resp_hora[hb] += resp
+        dw = dt.weekday()
+        env_dow[dw] += 1
+        resp_dow[dw] += resp
+        env_linea[r["line"]] = env_linea.get(r["line"], 0) + 1
+        resp_linea[r["line"]] = resp_linea.get(r["line"], 0) + resp
+        d = day_ec(fo)
+        if d in env_dia_coh:
+            env_dia_coh[d] += 1
+            resp_dia_coh[d] += resp
+        zona, tipo = chat_meta.get(key, (None, None))
+        if zona:
+            z = zona_stat.setdefault(zona, [0, 0])
+            z[0] += 1
+            z[1] += resp
+        if tipo:
+            t = tipo_stat.setdefault(tipo, [0, 0])
+            t[0] += 1
+            t[1] += resp
 
     diaria = {
         "dias": dias_lista,
         "enviados": [env_dia[d] for d in dias_lista],
         "respuestas": [rec_dia[d] for d in dias_lista],
-        "tasa": [_pct(rec_dia[d], env_dia[d]) for d in dias_lista],
+        # tasa de respuesta de la cohorte de prospectos contactada ese día (≤100%).
+        "tasa": [_pct(resp_dia_coh[d], env_dia_coh[d]) for d in dias_lista],
     }
 
     lineas = [
         {
             "line": ln["nombre"],
             "enviados": env_linea.get(ln["nombre"], 0),
-            "respuestas": rec_linea.get(ln["nombre"], 0),
-            "tasa": _pct(rec_linea.get(ln["nombre"], 0), env_linea.get(ln["nombre"], 0)),
+            "respuestas": resp_linea.get(ln["nombre"], 0),
+            "tasa": _pct(resp_linea.get(ln["nombre"], 0), env_linea.get(ln["nombre"], 0)),
         }
         for ln in config.lines()
     ]
@@ -492,8 +517,8 @@ def build_graficos(dias=30):
         {
             "bloque": f"{i * 2:02d}-{i * 2 + 2:02d}",
             "enviados": env_hora[i],
-            "respuestas": rec_hora[i],
-            "tasa": _pct(rec_hora[i], env_hora[i]),
+            "respuestas": resp_hora[i],
+            "tasa": _pct(resp_hora[i], env_hora[i]),
         }
         for i in range(12)
     ]
@@ -501,20 +526,20 @@ def build_graficos(dias=30):
         {
             "dia": DIASEMANA[i],
             "enviados": env_dow[i],
-            "respuestas": rec_dow[i],
-            "tasa": _pct(rec_dow[i], env_dow[i]),
+            "respuestas": resp_dow[i],
+            "tasa": _pct(resp_dow[i], env_dow[i]),
         }
         for i in range(7)
     ]
 
-    env_total = sum(env_linea.values())
-    rec_total = sum(rec_linea.values())
+    env_total = sum(env_dia.values())
+    rec_total = sum(rec_dia.values())
     return {
         "dias": dias,
         "kpis": {
             "enviados": env_total,
             "respuestas": rec_total,
-            "tasa": _pct(rec_total, env_total),
+            "tasa": _pct(fun["respondidos"], fun["enviados"]),
             "interesados": fun["interesados"],
             "demos": fun["demo"],
             "cotizaciones": fun["cotizacion"],

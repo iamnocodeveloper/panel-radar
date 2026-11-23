@@ -214,7 +214,7 @@ function barsList(rows, keyName) {
   return `<div class="hbars">` + rows.map((r) => `<div class="hbrow">
       <span class="hbk" title="${esc(r[keyName])}">${esc(r[keyName])}</span>
       <div class="hbbar"><i style="width:${Math.round((r.enviados / max) * 100)}%"></i></div>
-      <span class="hbv">${r.enviados} env · ${pct(r.tasa)} resp</span>
+      <span class="hbv">${r.enviados} prosp · ${pct(r.tasa)} resp</span>
     </div>`).join("") + `</div>`;
 }
 
@@ -269,7 +269,7 @@ function renderGraficos() {
   const kpis = [
     ["Mensajes enviados", k.enviados, "acc", ICON.send, `últimos ${g.dias} días`],
     ["Mensajes recibidos", k.respuestas, "ok", ICON.in, `últimos ${g.dias} días`],
-    ["Tasa de respuesta", pct(k.tasa), "", ICON.check, "global del período"],
+    ["Tasa de respuesta", pct(k.tasa), "", ICON.check, "prospectos que respondieron"],
     ["Interesados", k.interesados, "warn", ICON.funnel, "llegaron a interesado"],
     ["Demos enviados", k.demos, "", ICON.grid, "con demo enviado"],
     ["Cotizaciones", k.cotizaciones, "warn", ICON.bars, "propuesta enviada"],
@@ -296,16 +296,16 @@ function renderGraficos() {
   // 2. Evolución diaria
   const dd = g.diaria;
   html += `<div class="card" style="margin-top:16px"><h3>${ICON.bars}Evolución diaria · enviados, respuestas y tasa (${g.dias} días)</h3>
-    <div class="body"><div class="legend"><span><i style="background:#3d8bfd"></i>Enviados</span><span><i style="background:#35c98a"></i>Respuestas</span><span><i style="background:#e0a53b"></i>Tasa de respuesta (0-100%)</span></div>
+    <div class="body"><div class="legend"><span><i style="background:#3d8bfd"></i>Mensajes enviados</span><span><i style="background:#35c98a"></i>Mensajes recibidos</span><span><i style="background:#e0a53b"></i>Tasa de respuesta (cohorte contactada ese día, 0-100%)</span></div>
     ${chartSVG(dd.dias.map((d) => d.slice(8) + "/" + d.slice(5, 7)), dd.enviados, dd.respuestas, dd.tasa)}</div></div>`;
 
   // 3. Comparativa de líneas
   const lg = g.lineas, lmax = Math.max(1, ...lg.flatMap((l) => [l.enviados, l.respuestas]));
-  html += `<div class="card" style="margin-top:16px"><h3>${ICON.grid}Comparativa de líneas (${g.dias} días)</h3>
+  html += `<div class="card" style="margin-top:16px"><h3>${ICON.grid}Comparativa de líneas · prospectos contactados (${g.dias} días)</h3>
     <div class="body"><div class="linecmp">` + lg.map((l) => `<div class="lc">
         <div class="lcn">${lineBadge(l.line)}</div>
-        <div class="lcb"><span>Enviados</span><div class="hbbar"><i style="width:${Math.round((l.enviados / lmax) * 100)}%"></i></div><b>${l.enviados}</b></div>
-        <div class="lcb"><span>Respuestas</span><div class="hbbar alt"><i style="width:${Math.round((l.respuestas / lmax) * 100)}%"></i></div><b>${l.respuestas}</b></div>
+        <div class="lcb"><span>Contactados</span><div class="hbbar"><i style="width:${Math.round((l.enviados / lmax) * 100)}%"></i></div><b>${l.enviados}</b></div>
+        <div class="lcb"><span>Respondieron</span><div class="hbbar alt"><i style="width:${Math.round((l.respuestas / lmax) * 100)}%"></i></div><b>${l.respuestas}</b></div>
         <div class="lct">tasa de respuesta: <b>${pct(l.tasa)}</b></div>
       </div>`).join("") + `</div></div></div>`;
 
@@ -317,11 +317,15 @@ function renderGraficos() {
 
   // 6. Mejores momentos
   html += `<div class="twocol">
-    <div class="card"><h3>${ICON.clock}Por hora del día · bloques de 2 h (30 días)</h3><div class="body">${chartSVG(g.horas.map((x) => x.bloque), g.horas.map((x) => x.enviados), g.horas.map((x) => x.respuestas), g.horas.map((x) => x.tasa))}</div></div>
-    <div class="card"><h3>${ICON.clock}Por día de la semana (30 días)</h3><div class="body">${chartSVG(g.diasemana.map((x) => x.dia), g.diasemana.map((x) => x.enviados), g.diasemana.map((x) => x.respuestas), g.diasemana.map((x) => x.tasa))}</div></div>
+    <div class="card"><h3>${ICON.clock}Por hora del día · bloques de 2 h (30 días)</h3><div class="body">
+      <div class="legend"><span><i style="background:#3d8bfd"></i>Prospectos contactados</span><span><i style="background:#35c98a"></i>Respondieron</span><span><i style="background:#e0a53b"></i>Tasa</span></div>
+      ${chartSVG(g.horas.map((x) => x.bloque), g.horas.map((x) => x.enviados), g.horas.map((x) => x.respuestas), g.horas.map((x) => x.tasa))}</div></div>
+    <div class="card"><h3>${ICON.clock}Por día de la semana (30 días)</h3><div class="body">
+      <div class="legend"><span><i style="background:#3d8bfd"></i>Prospectos contactados</span><span><i style="background:#35c98a"></i>Respondieron</span><span><i style="background:#e0a53b"></i>Tasa</span></div>
+      ${chartSVG(g.diasemana.map((x) => x.dia), g.diasemana.map((x) => x.enviados), g.diasemana.map((x) => x.respuestas), g.diasemana.map((x) => x.tasa))}</div></div>
   </div>`;
 
-  html += `<div class="foot">Datos de las dos líneas de WhatsApp (envíos y respuestas, vía WAHA) y del estado de los leads en Radar. La tasa de respuesta es respuestas ÷ enviados del período.</div>`;
+  html += `<div class="foot">Datos de las dos líneas de WhatsApp (envíos y respuestas, vía WAHA) y del estado de los leads en Radar. Barras del gráfico diario: mensajes. La «tasa de respuesta» (embudo, líneas, zona, rubro, hora y día) es: de los prospectos contactados, cuántos respondieron.</div>`;
   return html;
 }
 
