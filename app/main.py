@@ -370,7 +370,11 @@ def build_kanban():
     by_lead = {}
     unmatched = []
     for ch in chats:
-        if ch.get("lead_id"):
+        cli = allc.get(ch["id"]) or {}
+        # Un chat curado explícitamente (tiene nombre propio en `clientes`) es un cliente
+        # por sí mismo: no se absorbe en un lead al que solo cruzó por coincidencia de
+        # texto en el match difuso (caso real: la Clínica Poveda cayó en otro lead).
+        if ch.get("lead_id") and not cli.get("nombre"):
             by_lead.setdefault(ch["lead_id"], []).append(ch)
         else:
             unmatched.append(ch)
@@ -666,7 +670,7 @@ def api_health():
     return {
         "status": "ok",
         "last_refresh": store.get_meta("last_refresh"),
-        "version": "1.3.2",
+        "version": "1.3.3",
         "auth_configurada": bool(config.PANEL_PASS),
         "ingest_configurada": bool(config.ingest_key()),
         "arrancado_en": ARRANCADO_EN,
