@@ -17,14 +17,23 @@ STATIC_DIR = os.path.join(os.path.dirname(__file__), "static")
 
 ESTADOS = ["nuevo", "contactado", "respondio", "reunion", "cliente", "descartado"]
 
+# Fail-closed: el panel muestra teléfonos de clientes. Si falta la credencial, el
+# proceso se niega a arrancar (uvicorn aborta) en vez de servir sin autenticación.
+if not (config.PANEL_USER and config.PANEL_PASS):
+    raise RuntimeError(
+        "Fail-closed: faltan PANEL_CAPI_USER/PANEL_CAPI_PASS. El panel no arranca sin credenciales."
+    )
+
 app = FastAPI(title="Panel Radar", docs_url=None, redoc_url=None, openapi_url=None)
 
 
 # --------------------------------------------------------------- Auth
 
 def _check_auth(request: Request):
+    # Fail-closed: sin contraseña configurada el proceso ni siquiera arranca
+    # (ver comprobación al final del módulo). Nunca se deja pasar sin auth.
     if not config.PANEL_PASS:
-        return True
+        return False
     hdr = request.headers.get("authorization", "")
     if not hdr.lower().startswith("basic "):
         return False
@@ -215,6 +224,7 @@ def api_health():
         "status": "ok",
         "last_refresh": store.get_meta("last_refresh"),
         "version": "1.0.0",
+        "auth_configurada": bool(config.PANEL_PASS),
         "arrancado_en": ARRANCADO_EN,
     }
 

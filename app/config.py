@@ -1,4 +1,5 @@
 """Configuración del panel a partir de variables de entorno."""
+import base64
 import json
 import os
 
@@ -7,8 +8,22 @@ RADAR_API_TOKEN = os.environ.get("RADAR_API_TOKEN", "")
 
 WAHA_API_KEY = os.environ.get("WAHA_API_KEY", "")
 
-PANEL_USER = os.environ.get("PANEL_USER", "admin")
-PANEL_PASS = os.environ.get("PANEL_PASS", "")
+
+def _env_secret(plain_name, b64_name, base_name):
+    """El panel de EasyPanel corta un valor en el carácter # (comentario). Para no
+    depender de comillas, aceptamos el secreto también en base64."""
+    v = os.environ.get(b64_name)
+    if v:
+        try:
+            return base64.b64decode(v).decode("utf-8")
+        except Exception:  # noqa: BLE001
+            pass
+    v = os.environ.get(plain_name) or os.environ.get(base_name, "")
+    return v.strip().strip("'\"")
+
+
+PANEL_USER = _env_secret("PANEL_CAPI_USER", "PANEL_CAPI_USER_B64", "PANEL_USER") or "admin"
+PANEL_PASS = _env_secret("PANEL_CAPI_PASS", "PANEL_CAPI_PASS_B64", "PANEL_PASS")
 
 DB_PATH = os.environ.get("DB_PATH", "/data/panel.db")
 REFRESH_SECONDS = int(os.environ.get("REFRESH_SECONDS", "300"))
