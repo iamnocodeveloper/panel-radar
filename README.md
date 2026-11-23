@@ -22,11 +22,34 @@ Radar y las dos líneas de WhatsApp (WAHA) y muestra:
 El panel **no envía ningún mensaje por WhatsApp**: solo lee, cambia el estado de un lead en
 Radar y guarda datos propios del panel.
 
+## Automáticas vs. personas
+
+Los negocios contestan muchas veces con un **bot de recepción** («Gracias por su mensaje, en
+breve le atenderemos», horarios, bienvenidas…). Eso **no es una persona**, así que **no cuenta
+como respuesta**: quien solo recibió el saludo del bot queda en «Contactado» con la etiqueta
+**«solo auto»**, no en «Respondió».
+
+- Cada mensaje entrante se clasifica como **automático o humano** al guardarlo y el resultado
+  se persiste en la columna `messages.auto` (no se recalcula en cada lectura). La heurística
+  (`AUTO_PATTERN` en `app/sync.py`) es **la misma** que usa el resto del sistema
+  (`radar_respuestas.py`), para que no haya dos criterios.
+- En el kanban, un cliente pasa a **«Respondió»** solo si tiene **al menos un mensaje humano**.
+  La fecha de **«Se interesó»** es la del primer mensaje **humano** (si antes hubo un bot, no
+  cuenta).
+- El **resumen** separa respuestas **reales** y **automáticas**, y la **tasa de respuesta** se
+  calcula sobre las reales.
+- En la tabla de conversaciones y en el hilo, cada mensaje entrante automático lleva la etiqueta
+  discreta **«auto»**.
+- **Corrección a mano** (manda sobre la heurística): en el hilo, el botón por mensaje
+  «marcar auto / marcar real» fija `msg_manual` (una marca manual nunca se vuelve a clasificar);
+  en la tarjeta, «Marcar solo auto / Quitar solo auto» fija `clientes.solo_auto`.
+
 ## Fechas por cliente
 
 Para cada cliente se guardan en la tabla `clientes` (persistente en el volumen):
 
-- **Se interesó**: primer mensaje entrante del cliente en el hilo (deducido de WAHA).
+- **Se interesó**: primer mensaje entrante **humano** del cliente en el hilo (deducido de WAHA;
+  los saludos automáticos del bot no cuentan).
 - **Demo enviado**: primer envío nuestro con multimedia (imagen/documento) y un enlace a una
   demo (`easypanel.host`); si no hay enlace, el primer envío de imagen/documento. Si no se puede
   deducir queda «—» y se puede fijar a mano.
@@ -74,7 +97,9 @@ env entero para añadir una variable corrompería las demás.
 - `GET /api/chat/{line}/{chat_id}` — hilo de una conversación
 - `GET /api/envios` — serie de 14 días por línea
 - `POST /api/cliente/{key}/extra` — estado propio del panel + nota + fechas (`{estado_extra, nota,
-  interesado_el, demo_enviado_el, cotizacion_enviada_el}`); solo escribe las claves enviadas
+  interesado_el, demo_enviado_el, cotizacion_enviada_el, solo_auto}`); solo escribe las claves enviadas
+- `POST /api/mensaje/{msg_id}/clasificar` — corrige un mensaje entrante (`{"auto": true|false}`;
+  `null` borra la corrección y vuelve a la heurística)
 - `POST /api/ingest` — ingesta curada externa, autenticada con cabecera `X-Ingest-Key`
 - `POST /api/ingest_key` — fija/rota la clave de ingesta (requiere la contraseña del panel)
 - `POST /api/lead/{id}/status` — cambia el estado en Radar (`{"estado": "..."}`)

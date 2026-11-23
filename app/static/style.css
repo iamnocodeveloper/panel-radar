@@ -81,6 +81,12 @@ label.f{color:var(--mut);font-size:12.5px;display:flex;flex-direction:column;gap
 .pill.l1{color:#8fb8ff;border-color:rgba(61,139,253,.4)}
 .pill.l2{color:#c79bff;border-color:rgba(150,110,255,.4)}
 .pill.resp{color:var(--ok);border-color:rgba(53,201,138,.4)}
+.pill.autotag{color:#e0a53b;border-color:rgba(224,165,59,.55);background:rgba(224,165,59,.10);text-transform:none}
+.help{display:flex;align-items:center;gap:7px;margin:12px 0 2px;padding:8px 12px;border:1px dashed var(--line);border-radius:9px;color:var(--mut);font-size:12.5px}
+.help svg{width:15px;height:15px;flex:none;color:var(--warn)}
+.mb{margin-left:6px;font-size:10.5px;padding:1px 6px;border-radius:20px;border:1px solid var(--line);background:transparent;color:var(--mut);cursor:pointer}
+.mb:hover{border-color:var(--acc);color:#fff}
+.mb.on{color:#e0a53b;border-color:rgba(224,165,59,.55)}
 .kcard .fechas{display:flex;flex-direction:column;gap:2px;margin-top:7px;font-size:11.5px;color:var(--mut)}
 .kcard .fechas b{color:var(--dim);font-weight:600;display:inline-block;min-width:74px}
 .kcard .msg{color:var(--mut);font-size:12.5px;margin-top:7px;border-left:2px solid var(--line);padding-left:8px;word-break:break-word}

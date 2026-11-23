@@ -156,7 +156,7 @@ def effective_col(radar_estado, responded, cli):
     base = {
         "nuevo": "nuevo",
         "contactado": "respondio" if responded else "contactado",
-        "respondio": "respondio",
+        "respondio": "respondio" if responded else "contactado",
         "reunion": "interesado",
     }.get(radar_estado, "nuevo")
     cands = [base]
@@ -190,6 +190,7 @@ def _merge_clientes(rows):
         "estado_extra": first("estado_extra"),
         "nota": first("nota"),
         "nombre": first("nombre"),
+        "solo_auto": first("solo_auto"),
         "interesado_el": earliest("interesado_el"),
         "demo_enviado_el": earliest("demo_enviado_el"),
         "cotizacion_enviada_el": earliest("cotizacion_enviada_el"),
@@ -215,37 +216,64 @@ def line_statuses():
 def build_resumen():
     enviados = {}
     respuestas = {}
+    resp_reales = {}
+    resp_auto = {}
+    inicio_hoy = int(datetime.now(EC).replace(hour=0, minute=0, second=0, microsecond=0).timestamp())
     for line in config.lines():
         n = line["nombre"]
         e = store.query(
             "SELECT COUNT(*) c FROM messages WHERE line=? AND from_me=1 AND ts>=?",
-            (n, int(datetime.now(EC).replace(hour=0, minute=0, second=0, microsecond=0).timestamp())),
+            (n, inicio_hoy),
         )
         r = store.query(
-            "SELECT COUNT(*) c FROM messages WHERE line=? AND from_me=0 AND ts>=?",
-            (n, int(datetime.now(EC).replace(hour=0, minute=0, second=0, microsecond=0).timestamp())),
+            """SELECT COALESCE(SUM(CASE WHEN COALESCE(mm.es_auto,m.auto)=1 THEN 1 ELSE 0 END),0) a,
+                      COALESCE(SUM(CASE WHEN COALESCE(mm.es_auto,m.auto)=0 THEN 1 ELSE 0 END),0) h,
+                      COUNT(*) c
+                 FROM messages m LEFT JOIN msg_manual mm ON mm.msg_id=m.msg_id
+                WHERE m.line=? AND m.from_me=0 AND m.ts>=?""",
+            (n, inicio_hoy),
         )
         enviados[n] = e[0]["c"] if e else 0
         respuestas[n] = r[0]["c"] if r else 0
+        resp_auto[n] = r[0]["a"] if r else 0
+        resp_reales[n] = r[0]["h"] if r else 0
 
-    esp = store.query("SELECT COUNT(*) c FROM chats WHERE is_prospect=1 AND responded=0")
-    prosp = store.query("SELECT COUNT(*) c FROM chats WHERE is_prospect=1")
-    resp = store.query("SELECT COUNT(*) c FROM chats WHERE is_prospect=1 AND responded=1")
-    n_prosp = prosp[0]["c"] if prosp else 0
-    n_resp = resp[0]["c"] if resp else 0
+    # Personas, no bots: «respondió» solo cuenta un mensaje HUMANO. Quien solo recibió
+    # el saludo del bot queda como «solo automáticas» (no suma a la tasa de respuesta).
+    prosp = store.query(
+        "SELECT id,line,responded,human_count,auto_count FROM chats WHERE is_prospect=1"
+    )
+    clis = store.cliente_all()
+    n_prosp = len(prosp)
+    n_real = n_auto = 0
+    for r in prosp:
+        responded, solo = _respuesta_efectiva(
+            clis.get(r["id"]) or {}, r["responded"], r["human_count"] or 0, r["auto_count"] or 0
+        )
+        if responded:
+            n_real += 1
+        elif solo:
+            n_auto += 1
+    n_resp = n_real  # la tasa se calcula sobre respuestas REALES
     clientes = store.query("SELECT COUNT(*) c FROM leads WHERE estado='cliente'")
     radar = json.loads(store.get_meta("resumen", "{}") or "{}")
 
     return {
         "enviados_hoy": enviados,
         "respuestas_hoy": respuestas,
-        "esperando_respuesta": esp[0]["c"] if esp else 0,
+        "respuestas_reales_hoy": resp_reales,
+        "respuestas_auto_hoy": resp_auto,
+        "esperando_respuesta": sum(1 for r in prosp if not r["responded"]),
         "prospectos_contactados": n_prosp,
-        "prospectos_respondieron": n_resp,
+        "prospectos_respondieron": n_real,
+        "prospectos_respondieron_auto": n_auto,
+        "prospectos_respondieron_total": n_real + n_auto,
         "tasa_respuesta": round(100.0 * n_resp / n_prosp, 1) if n_prosp else 0.0,
+        "tasa_respuesta_total": round(100.0 * (n_real + n_auto) / n_prosp, 1) if n_prosp else 0.0,
         "clientes_cerrados": clientes[0]["c"] if clientes else 0,
         "radar": radar,
         "lineas": line_statuses(),
+        "ayuda_auto": "Las respuestas automáticas de los negocios (bots de recepción) no cuentan como respuesta.",
     }
 
 
@@ -262,6 +290,9 @@ def _chat_embed(ch):
         "sent": ch.get("sent_count"),
         "recv": ch.get("recv_count"),
         "responded": bool(ch.get("responded")),
+        "human_count": ch.get("human_count") or 0,
+        "auto_count": ch.get("auto_count") or 0,
+        "ultimo_auto": bool(ch.get("last_in_auto")),
     }
 
 
@@ -276,7 +307,25 @@ def _cliente_embed(cli):
         "cotizacion_fmt": fmt_fecha(cli.get("cotizacion_enviada_el")),
         "estado_extra": cli.get("estado_extra"),
         "nota": cli.get("nota"),
+        "solo_auto_manual": cli.get("solo_auto"),
     }
+
+
+def _respuesta_efectiva(cli, chat_responded, human_count, auto_count):
+    """Decide «¿es una respuesta real?» y «¿es solo automáticas?» para un cliente.
+
+    Manda la corrección a mano (`clientes.solo_auto`: 1 = solo automáticas, 0 = real,
+    NULL = decide la heurística). La heurística: solo automáticas si hay algún entrante
+    automático y NINGÚN entrante humano. Devuelve (responded, solo_auto).
+    """
+    man = (cli or {}).get("solo_auto")
+    if man == 1:
+        return False, True
+    if man == 0:
+        return True, False
+    responded = bool(chat_responded)
+    solo = bool(auto_count) and not human_count
+    return responded, solo
 
 
 def _chat_id_de_clave(key):
@@ -331,6 +380,9 @@ def _dedupe_cards(cards):
 
         rep = max(g, key=lambda c: ((c.get("conversacion") or {}).get("ultimo_ts") or 0))
         base = dict(rep)
+        base["solo_auto"] = any(c.get("solo_auto") for c in g)
+        base["human_count"] = max((c.get("human_count") or 0) for c in g)
+        base["auto_count"] = max((c.get("auto_count") or 0) for c in g)
         estados = [c.get("estado") for c in g if c.get("estado")]
         if estados:
             base["estado"] = max(estados, key=lambda e: 99 if e in TERMINALES else RANK.get(e, 0))
@@ -385,9 +437,12 @@ def build_kanban():
     for l in store.query("SELECT * FROM leads"):
         lead_chats = sorted(by_lead.get(l["id"], []), key=lambda c: c.get("last_ts") or 0, reverse=True)
         rep = lead_chats[0] if lead_chats else None
-        responded = any(c.get("responded") for c in lead_chats)
         rows = [allc.get(c["id"]) for c in lead_chats] + [allc.get(f"lead:{l['id']}")]
         cli = _merge_clientes(rows)
+        h = sum((c.get("human_count") or 0) for c in lead_chats)
+        a = sum((c.get("auto_count") or 0) for c in lead_chats)
+        cualquier_resp = any(c.get("responded") for c in lead_chats)
+        responded, solo_auto = _respuesta_efectiva(cli, cualquier_resp, h, a)
         consumed.add(f"lead:{l['id']}")
         for c in lead_chats:
             consumed.add(c["id"])
@@ -406,6 +461,9 @@ def build_kanban():
             "estado": effective_col(radar_estado, responded, cli),
             "radar_estado": radar_estado,
             "mensajes_enviados": l.get("mensajes_enviados"),
+            "solo_auto": solo_auto,
+            "human_count": h,
+            "auto_count": a,
             "conversacion": _chat_embed(rep) if rep else None,
         }
         card.update(_cliente_embed(cli))
@@ -416,6 +474,9 @@ def build_kanban():
         consumed.add(ch["id"])
         consumed.add(f"chat:{ch['line']}:{ch['id']}")
         zones.add("—")
+        responded, solo_auto = _respuesta_efectiva(
+            cli, ch.get("responded"), ch.get("human_count") or 0, ch.get("auto_count") or 0
+        )
         card = {
             "key": f"chat:{ch['line']}:{ch['id']}",
             "cliente_key": ch["id"],
@@ -423,9 +484,12 @@ def build_kanban():
             "nombre": cli.get("nombre") or ch.get("name") or f"…{ch['phone_last4']}",
             "zona": None,
             "tipo": None,
-            "estado": effective_col("contactado", ch.get("responded"), cli),
+            "estado": effective_col("contactado", responded, cli),
             "radar_estado": None,
             "mensajes_enviados": None,
+            "solo_auto": solo_auto,
+            "human_count": ch.get("human_count") or 0,
+            "auto_count": ch.get("auto_count") or 0,
             "conversacion": _chat_embed(ch),
         }
         card.update(_cliente_embed(cli))
@@ -446,12 +510,19 @@ def build_kanban():
             "estado": effective_col("nuevo", False, cli),
             "radar_estado": None,
             "mensajes_enviados": None,
+            "solo_auto": False,
+            "human_count": 0,
+            "auto_count": 0,
             "conversacion": None,
         }
         card.update(_cliente_embed(cli))
         cards.append(card)
 
     cards = _dedupe_cards(cards)
+    for c in cards:
+        # coherencia: «solo auto» implica que no se le cuenta como respuesta
+        if c.get("estado") != "contactado":
+            c["solo_auto"] = False
     cards.sort(key=lambda c: (-(((c["conversacion"] or {}).get("ultimo_ts") or 0)), (c["nombre"] or "").lower()))
 
     counts = {e: 0 for e in ESTADOS}
@@ -670,7 +741,7 @@ def api_health():
     return {
         "status": "ok",
         "last_refresh": store.get_meta("last_refresh"),
-        "version": "1.3.3",
+        "version": "1.4.0",
         "auth_configurada": bool(config.PANEL_PASS),
         "ingest_configurada": bool(config.ingest_key()),
         "arrancado_en": ARRANCADO_EN,
@@ -711,12 +782,15 @@ def api_conversations(q: str = "", line: str = "", zona: str = ""):
             lead = l[0] if l else None
         cli = store.cliente_get(ch["id"]) or {}
         radar_estado = (lead["estado"] if lead else None) or "contactado"
+        responded, solo_auto = _respuesta_efectiva(
+            cli, ch.get("responded"), ch.get("human_count") or 0, ch.get("auto_count") or 0
+        )
         item = {
             "chat_id": ch["id"],
             "line": ch["line"],
             "nombre": cli.get("nombre") or ch.get("name") or f"…{ch['phone_last4']}",
             "phone_last4": ch["phone_last4"],
-            "estado": effective_col(radar_estado, ch.get("responded"), cli),
+            "estado": effective_col(radar_estado, responded, cli),
             "lead_nombre": lead["nombre"] if lead else None,
             "zona": lead["zona"] if lead else None,
             "tipo": lead["tipo"] if lead else None,
@@ -727,7 +801,11 @@ def api_conversations(q: str = "", line: str = "", zona: str = ""):
             "media": ch.get("last_media_type") if ch.get("last_has_media") else None,
             "sent": ch.get("sent_count"),
             "recv": ch.get("recv_count"),
-            "responded": bool(ch.get("responded")),
+            "responded": responded,
+            "human_count": ch.get("human_count") or 0,
+            "auto_count": ch.get("auto_count") or 0,
+            "solo_auto": solo_auto,
+            "ultimo_auto": bool(ch.get("last_in_auto")),
         }
         out.append(item)
     if zona:
@@ -747,11 +825,16 @@ def api_conversations(q: str = "", line: str = "", zona: str = ""):
 
 @app.get("/api/chat/{line}/{chat_id}")
 def api_chat(line: str, chat_id: str):
-    msgs = store.query(
-        "SELECT msg_id,ts,from_me,body,has_media,media_type FROM messages "
-        "WHERE chat_id=? AND line=? ORDER BY ts ASC",
-        (chat_id, line),
-    )
+    def _leer():
+        return store.query(
+            "SELECT m.msg_id, m.ts, m.from_me, m.body, m.has_media, m.media_type, "
+            "COALESCE(mm.es_auto, m.auto) auto "
+            "FROM messages m LEFT JOIN msg_manual mm ON mm.msg_id=m.msg_id "
+            "WHERE m.chat_id=? AND m.line=? ORDER BY m.ts ASC",
+            (chat_id, line),
+        )
+
+    msgs = _leer()
     if not msgs:
         for ln in config.lines():
             if ln["nombre"] == line:
@@ -760,8 +843,8 @@ def api_chat(line: str, chat_id: str):
                     for m in thread:
                         if m.get("id"):
                             store.execute(
-                                "INSERT OR REPLACE INTO messages(msg_id,chat_id,line,ts,from_me,body,has_media,media_type)"
-                                " VALUES(?,?,?,?,?,?,?,?)",
+                                "INSERT OR REPLACE INTO messages(msg_id,chat_id,line,ts,from_me,body,has_media,media_type,auto)"
+                                " VALUES(?,?,?,?,?,?,?,?,?)",
                                 (
                                     m["id"],
                                     chat_id,
@@ -771,28 +854,41 @@ def api_chat(line: str, chat_id: str):
                                     m.get("body"),
                                     1 if m.get("hasMedia") else 0,
                                     sync.media_label(m),
+                                    sync.clasificar_auto(m.get("body")),
                                 ),
                             )
                 except Exception:  # noqa: BLE001
                     pass
                 break
-        msgs = store.query(
-            "SELECT msg_id,ts,from_me,body,has_media,media_type FROM messages "
-            "WHERE chat_id=? AND line=? ORDER BY ts ASC",
-            (chat_id, line),
-        )
+        msgs = _leer()
     name = store.query("SELECT name,phone_last4 FROM chats WHERE id=? AND line=?", (chat_id, line))
+    ch = store.query(
+        "SELECT responded,human_count,auto_count,last_in_auto FROM chats WHERE id=? AND line=?",
+        (chat_id, line),
+    )
+    ch = ch[0] if ch else {}
+    cli = store.cliente_get(chat_id) or {}
+    responded, solo_auto = _respuesta_efectiva(
+        cli, ch.get("responded"), ch.get("human_count") or 0, ch.get("auto_count") or 0
+    )
     return {
         "chat_id": chat_id,
         "line": line,
         "nombre": (name[0]["name"] or f"…{name[0]['phone_last4']}") if name else None,
+        "responded": responded,
+        "human_count": ch.get("human_count") or 0,
+        "auto_count": ch.get("auto_count") or 0,
+        "solo_auto": solo_auto,
+        "solo_auto_manual": cli.get("solo_auto"),
         "mensajes": [
             {
+                "msg_id": m["msg_id"],
                 "from_me": bool(m["from_me"]),
                 "ts": m["ts"],
                 "fmt": fmt_full(m["ts"]),
                 "body": m["body"],
                 "media": m["media_type"] if m["has_media"] else None,
+                "auto": bool(m["auto"]) if not m["from_me"] else None,
             }
             for m in msgs
         ],
@@ -875,6 +971,13 @@ async def api_cliente_extra(key: str, request: Request):
         vals["estado_extra"] = ee
     if "nota" in body:
         vals["nota"] = (body.get("nota") or "").strip()[:500]
+    if "solo_auto" in body:
+        # 1 = forzar «solo automáticas», 0 = forzar «respuesta real», null/"" = heurística
+        sa = body.get("solo_auto")
+        if sa in (None, ""):
+            vals["solo_auto"] = None
+        else:
+            vals["solo_auto"] = 1 if str(sa).lower() in ("1", "true", "si", "sí") else 0
     for f in ("interesado_el", "demo_enviado_el", "cotizacion_enviada_el"):
         if f in body:
             vals[f] = (body.get(f) or "").strip()[:40]
@@ -883,6 +986,38 @@ async def api_cliente_extra(key: str, request: Request):
     store.cliente_set(key, vals)
     cli = store.cliente_get(key) or {}
     return {"ok": True, "cliente": {**_cliente_embed(cli), "cliente_key": key}}
+
+
+# Mensajes: nombre de la línea y chat a partir del msg_id (se usa para recomputar el chat).
+def _chat_de_msg(msg_id):
+    r = store.query("SELECT chat_id, line FROM messages WHERE msg_id=?", (msg_id,))
+    return (r[0]["chat_id"], r[0]["line"]) if r else (None, None)
+
+
+@app.post("/api/mensaje/{msg_id}/clasificar")
+async def api_clasificar_mensaje(msg_id: str, request: Request):
+    """Corrige a mano la clasificación de un mensaje entrante (manda sobre la heurística).
+
+    `{"auto": true|false}` marca automático/humano; `{"auto": null}` borra la corrección y
+    devuelve el mensaje a la heurística. La marca vive en `msg_manual` y sobrevive a los
+    refrescos (que reescriben `messages`, pero nunca esa tabla).
+    """
+    body = await request.json()
+    body = body or {}
+    if "auto" not in body:
+        raise HTTPException(400, "falta auto")
+    val = body.get("auto")
+    if val is None:
+        store.execute("DELETE FROM msg_manual WHERE msg_id=?", (msg_id,))
+    else:
+        store.execute(
+            "INSERT OR REPLACE INTO msg_manual(msg_id,es_auto,updated_at) VALUES(?,?,?)",
+            (msg_id, 1 if val else 0, store.now()),
+        )
+    chat_id, line = _chat_de_msg(msg_id)
+    if chat_id:
+        sync.recomputar_respuestas()
+    return {"ok": True, "msg_id": msg_id, "auto": None if val is None else bool(val)}
 
 
 @app.post("/api/cliente/{key}/delete")

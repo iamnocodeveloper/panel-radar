@@ -20,9 +20,118 @@ DEMO_LINK = re.compile(r"easypanel\.host", re.IGNORECASE)
 # Un envío con precios / propuesta cuenta como cotización.
 PRICE_WORDS = re.compile(r"\$\s?\d|cotiza|propuesta", re.IGNORECASE)
 DEMO_MEDIA = ("imagen", "documento")
-# Un saludo automático del negocio llega en segundos tras nuestro primer mensaje.
-# No cuenta como «se interesó» (ver `derive_dates`).
-AUTO_ACK_SECONDS = 60
+
+# Auto-respuesta de un negocio (bot de recepción / secretaría / aviso de horario).
+# MISMA heurística que el resto del sistema (`radar_respuestas.py`): si diverge, el panel
+# y el vigilante de respuestas cuentan cosas distintas. Se normalizan los espacios antes
+# de buscar para que «gracias por  comunicarte» (doble espacio) también caiga.
+AUTO_PATTERN = re.compile(
+    r"gracias por (tu |su )?(mensaje|comunicarte|comunicarse|contacto|escribir)|en breve (te|le) (respond|atend)"
+    r"|horario de atenci|no (estamos|estoy) disponible|fuera de horario|responderemos"
+    r"|mensaje autom|este es un (mensaje|chat) autom|bot\b"
+    r"|(con la|contigo) (secretari|recepci)|le (atenderemos|responderemos) (en|a la brevedad)"
+    r"|en un momento (le|te) atiend|deje (su|tu) mensaje|deje su mensaje y|escr[ií]banos"
+    r"|puede dejarnos (su|tu) (mensaje|consulta)"
+    r"|cierra (la|su|tu) sesi[oó]n|sesi[oó]n por inactividad|se cierra la sesi"
+    r"|asistente virtual|soy (el|un) (asistente|bot)|bienvenid",
+    re.IGNORECASE,
+)
+
+
+def clasificar_auto(body):
+    """1 si el texto es una respuesta automática de negocio, 0 si parece una persona."""
+    if not body:
+        return 0
+    return 1 if AUTO_PATTERN.search(re.sub(r"\s+", " ", body)) else 0
+
+
+def clasificar_mensajes():
+    """Clasifica de una vez los mensajes entrantes que ya estaban en la base.
+
+    Guarda el resultado en `messages.auto` (columna propia: no se recalcula en cada
+    lectura). Solo corre una vez; los mensajes nuevos se clasifican al insertarlos y las
+    correcciones a mano viven aparte (`msg_manual`), así que nunca se pisan.
+    """
+    if store.get_meta("auto_v1") == "1":
+        return 0
+    rows = store.query(
+        "SELECT msg_id, body FROM messages WHERE from_me=0 AND COALESCE(auto,0)=0 "
+        "AND body IS NOT NULL AND body<>''"
+    )
+    upd = [(r["msg_id"],) for r in rows if clasificar_auto(r["body"])]
+    if upd:
+        store.executemany("UPDATE messages SET auto=1 WHERE msg_id=?", upd)
+    _limpiar_interesado_auto()
+    store.set_meta("auto_v1", "1")
+    return len(upd)
+
+
+def _limpiar_interesado_auto():
+    """Borra un «se interesó» que en realidad era el saludo del bot.
+
+    Los datos viejos deducían esa fecha del primer entrante, fuera bot o persona. Si la
+    fecha guardada coincide con un mensaje entrante AUTOMÁTICO del hilo, se vacía para
+    que `autofill_dates` la vuelva a deducir del primer mensaje humano.
+    """
+    from datetime import datetime
+
+    rows = store.query(
+        "SELECT m.chat_id, m.line, m.ts FROM messages m "
+        "LEFT JOIN msg_manual mm ON mm.msg_id=m.msg_id "
+        "WHERE m.from_me=0 AND COALESCE(mm.es_auto,m.auto)=1"
+    )
+    por_chat = {}
+    for r in rows:
+        por_chat.setdefault(r["chat_id"], []).append(int(r["ts"]))
+    for cid, autos in por_chat.items():
+        cli = store.cliente_get(cid)
+        if not cli or not cli.get("interesado_el"):
+            continue
+        try:
+            v = datetime.fromisoformat(str(cli["interesado_el"]).replace("Z", "+00:00")).timestamp()
+        except Exception:  # noqa: BLE001
+            continue
+        if any(abs(v - a) <= 90 for a in autos):
+            store.cliente_set(cid, {"interesado_el": ""})
+
+
+def recomputar_respuestas():
+    """Recalcula, por conversación, cuántos entrantes son humanos y cuántos automáticos.
+
+    `responded` pasa a significar «hay al menos un mensaje HUMANO»: un bot de recepción
+    ya no cuenta como respuesta. La corrección manual de un mensaje (`msg_manual`) manda
+    sobre la columna `messages.auto`.
+    """
+    agg = store.query(
+        """SELECT m.chat_id, m.line,
+                  SUM(CASE WHEN m.from_me=0 AND COALESCE(mm.es_auto,m.auto)=0 THEN 1 ELSE 0 END) human,
+                  SUM(CASE WHEN m.from_me=0 AND COALESCE(mm.es_auto,m.auto)=1 THEN 1 ELSE 0 END) autos,
+                  MIN(CASE WHEN m.from_me=1 THEN m.ts END) first_out,
+                  MAX(CASE WHEN m.from_me=0 AND COALESCE(mm.es_auto,m.auto)=0 THEN m.ts END) last_human
+             FROM messages m LEFT JOIN msg_manual mm ON mm.msg_id=m.msg_id
+            GROUP BY m.chat_id, m.line"""
+    )
+    inb = store.query(
+        """SELECT m.chat_id, m.line, m.ts, COALESCE(mm.es_auto,m.auto) auto
+             FROM messages m LEFT JOIN msg_manual mm ON mm.msg_id=m.msg_id
+            WHERE m.from_me=0 ORDER BY m.ts"""
+    )
+    last_auto = {}
+    for r in inb:
+        last_auto[(r["chat_id"], r["line"])] = 1 if r["auto"] else 0
+    upd = []
+    for r in agg:
+        human = r["human"] or 0
+        autos = r["autos"] or 0
+        responded = 1 if human > 0 and (r["first_out"] is None or (r["last_human"] or 0) >= r["first_out"]) else 0
+        upd.append((responded, human, autos, last_auto.get((r["chat_id"], r["line"])), r["chat_id"], r["line"]))
+    if upd:
+        store.executemany(
+            "UPDATE chats SET responded=?, human_count=?, auto_count=?, last_in_auto=? "
+            "WHERE id=? AND line=?",
+            upd,
+        )
+    return len(upd)
 
 
 def norm(s):
@@ -75,10 +184,11 @@ def _iso(ts):
 def derive_dates(msgs):
     """Deduce las tres fechas de un hilo, mezclando mensajes de WAHA y filas de SQLite.
 
-    - interesado_el: instante del PRIMER mensaje entrante (fromMe=false) del hilo. Se
-      descarta el saludo automático del negocio (autorespuesta que llega en segundos
-      tras nuestro primer mensaje) cuando hay un mensaje entrante posterior: el cliente
-      «se interesó» cuando escribió de verdad, no cuando contestó su robot.
+    - interesado_el: instante del PRIMER mensaje entrante HUMANO del hilo. Se descartan
+      las respuestas automáticas del negocio (bots de recepción), clasificadas con la misma
+      heurística que el resto del sistema (`clasificar_auto`): el cliente «se interesó»
+      cuando escribió de verdad, no cuando contestó su robot. Si un mensaje trae su
+      clasificación ya hecha (`auto`), se usa esa; si no, se aplica la heurística.
     - demo_enviado_el: primer envío nuestro con multimedia (imagen/documento) y enlace
       easypanel.host; si no hay enlace, el primer envío de imagen/documento.
     - cotizacion_enviada_el: primer envío nuestro con precios / «cotiza» / «propuesta».
@@ -93,26 +203,21 @@ def derive_dates(msgs):
         mt = m.get("media_type")
         if mt is None:
             mt = media_label(m) if (m.get("hasMedia") or m.get("has_media")) else None
-        (outs if fm else ins).append((int(ts), body, mt))
+        es_auto = m.get("auto")
+        if es_auto is None:
+            es_auto = clasificar_auto(body)
+        (outs if fm else ins).append((int(ts), body, mt, es_auto))
 
-    in_ts = [t for t, _b, _m in ins]
-    out_ts = [t for t, _b, _m in outs]
-
-    def _auto_ack(t_in):
-        prev = [t for t in out_ts if t <= t_in]
-        if not prev or t_in - max(prev) > AUTO_ACK_SECONDS:
-            return False
-        # solo se descarta si hay un entrante posterior que represente el interés real
-        return any(t > t_in for t in in_ts)
-
-    human_in = [t for t in in_ts if not _auto_ack(t)]
+    human_in = [t for t, _b, _m, a in ins if not a]
     interesado = min(human_in, default=None)
     if interesado is None:
-        interesado = min(in_ts, default=None)
-    with_link = [t for t, b, m in outs if m in DEMO_MEDIA and DEMO_LINK.search(b)]
-    media_only = [t for t, _b, m in outs if m in DEMO_MEDIA]
+        # sin ningún entrante humano: no hay «se interesó» (antes caía al primer entrante,
+        # que es justo el saludo automático que no queremos contar).
+        interesado = None
+    with_link = [t for t, b, m, _a in outs if m in DEMO_MEDIA and DEMO_LINK.search(b)]
+    media_only = [t for t, _b, m, _a in outs if m in DEMO_MEDIA]
     demo = min(with_link) if with_link else (min(media_only) if media_only else None)
-    cot = [t for t, b, _m in outs if PRICE_WORDS.search(b)]
+    cot = [t for t, b, _m, _a in outs if PRICE_WORDS.search(b)]
     cotizacion = min(cot) if cot else None
 
     return {
@@ -161,8 +266,9 @@ def autofill_dates():
     n = 0
     for r in rows:
         msgs = store.query(
-            "SELECT ts, from_me, body, media_type FROM messages "
-            "WHERE chat_id=? AND line=? ORDER BY ts ASC",
+            "SELECT m.ts, m.from_me, m.body, m.media_type, COALESCE(mm.es_auto, m.auto) auto "
+            "FROM messages m LEFT JOIN msg_manual mm ON mm.msg_id=m.msg_id "
+            "WHERE m.chat_id=? AND m.line=? ORDER BY m.ts ASC",
             (r["id"], r["line"]),
         )
         if not msgs:
@@ -340,13 +446,14 @@ def _sync_line(line):
                         m.get("body"),
                         1 if m.get("hasMedia") else 0,
                         media_label(m),
+                        clasificar_auto(m.get("body")),
                     )
                 )
 
     if msgs:
         store.executemany(
-            """INSERT OR REPLACE INTO messages(msg_id,chat_id,line,ts,from_me,body,has_media,media_type)
-               VALUES(?,?,?,?,?,?,?,?)""",
+            """INSERT OR REPLACE INTO messages(msg_id,chat_id,line,ts,from_me,body,has_media,media_type,auto)
+               VALUES(?,?,?,?,?,?,?,?,?)""",
             msgs,
         )
     if rows:
@@ -427,6 +534,8 @@ def refresh():
             list(ex.map(_sync_line, config.lines()))
         match_leads()
         store.execute("UPDATE chats SET is_prospect=1 WHERE lead_id IS NOT NULL")
+        out["clasificados"] = clasificar_mensajes()
+        out["respuestas"] = recomputar_respuestas()
         out["fechas"] = autofill_dates()
         store.set_meta("last_refresh", store.now())
         out["elapsed"] = round(time.time() - t0, 1)

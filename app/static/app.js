@@ -25,6 +25,8 @@ const ICON = {
   bars: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M4 20V10M10 20V4M16 20v-7M22 20H2"/></svg>',
   funnel: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M3 4h18l-7 8v6l-4 2v-8L3 4z"/></svg>',
   clock: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="9"/><path d="M12 7v5l3 2"/></svg>',
+  bot: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="4" y="8" width="16" height="11" rx="3"/><path d="M12 4v4M8 13h.01M16 13h.01"/></svg>',
+  info: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="9"/><path d="M12 11v5M12 8h.01"/></svg>',
 };
 const $ = (q) => document.querySelector(q);
 const esc = (s) => (s == null ? "" : String(s).replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c])));
@@ -56,17 +58,21 @@ function renderResumen() {
   const r = S.state.resumen, ln = r.lineas;
   const envTotal = Object.values(r.enviados_hoy).reduce((a, b) => a + b, 0);
   const respTotal = Object.values(r.respuestas_hoy).reduce((a, b) => a + b, 0);
+  const realHoy = Object.values(r.respuestas_reales_hoy || {}).reduce((a, b) => a + b, 0);
+  const autoHoy = Object.values(r.respuestas_auto_hoy || {}).reduce((a, b) => a + b, 0);
   const kpis = [
     ["Enviados hoy", envTotal, "acc", ICON.send, Object.entries(r.enviados_hoy).map(([k, v]) => k + ": " + v).join(" · ") + (r.radar.sentTodayNew != null ? ` · Radar: ${r.radar.sentTodayNew}` : "")],
-    ["Respuestas hoy", respTotal, "ok", ICON.in, "mensajes recibidos de clientes"],
-    ["Esperando respuesta", r.esperando_respuesta, "warn", ICON.wait, "sin contestar todavía"],
-    ["Tasa de respuesta", pct(r.tasa_respuesta), "", ICON.check, `${r.prospectos_respondieron} de ${r.prospectos_contactados} prospectos`],
+    ["Respuestas hoy", respTotal, "ok", ICON.in, `${realHoy} reales · ${autoHoy} automáticas`],
+    ["Esperando respuesta", r.esperando_respuesta, "warn", ICON.wait, "sin una persona que conteste"],
+    ["Tasa de respuesta", pct(r.tasa_respuesta), "", ICON.check, `${r.prospectos_respondieron} reales de ${r.prospectos_contactados} contactados`],
+    ["Solo automáticas", r.prospectos_respondieron_auto ?? 0, "warn", ICON.bot, `de ${r.prospectos_respondieron_total ?? 0} que contestaron algo`],
     ["Clientes cerrados", r.clientes_cerrados, "ok", ICON.check, "estado: cliente"],
     ["Por contactar (cola)", r.radar.queuedNew ?? "—", "", ICON.grid, "nuevos en Radar"],
   ];
   let html = `<div class="grid kpis">` + kpis.map((k) =>
     `<div class="kpi ${k[2]}"><div class="lbl">${k[3]}${esc(k[0])}</div><div class="val">${esc(k[1])}</div><div class="sub">${esc(k[4])}</div></div>`
-  ).join("") + `</div>`;
+  ).join("") + `</div>
+  <div class="help">${ICON.info}${esc(r.ayuda_auto || "Las respuestas automáticas de los negocios (bots de recepción) no cuentan como respuesta.")}</div>`;
 
   html += `<div class="lines">` + Object.entries(ln).map(([name, s]) => {
     const ok = s.status === "WORKING";
@@ -92,6 +98,7 @@ function cardHTML(c) {
       ${cv.line ? lineBadge(cv.line) : ""}
       ${cv.phone_last4 ? `<span class="pill">…${esc(cv.phone_last4)}</span>` : ""}
       ${cv.responded ? `<span class="pill resp">respondió</span>` : ""}
+      ${c.solo_auto ? `<span class="pill autotag" title="Solo contestó un bot de recepción; no cuenta como respuesta">solo auto</span>` : ""}
       ${c.radar_estado && c.radar_estado !== c.estado ? `<span class="pill">Radar: ${esc(c.radar_estado)}</span>` : ""}
       ${!c.lead_id ? `<span class="pill">sin ficha</span>` : ""}
     </div>
@@ -100,7 +107,7 @@ function cardHTML(c) {
       <span><b>Demo enviado</b> ${c.demo_fmt ? esc(c.demo_fmt) : "—"}</span>
       <span><b>Cotización</b> ${c.cotizacion_fmt ? esc(c.cotizacion_fmt) : "—"}</span>
     </div>
-    ${cv.ultimo ? `<div class="msg">${cv.desde_cliente ? ICON.in + " " : ICON.out + " "}${esc(cv.ultimo)}${cv.media ? " [" + esc(cv.media) + "]" : ""}</div>
+    ${cv.ultimo ? `<div class="msg">${cv.desde_cliente ? ICON.in + " " : ICON.out + " "}${esc(cv.ultimo)}${cv.media ? " [" + esc(cv.media) + "]" : ""}${cv.desde_cliente && cv.ultimo_auto ? ' <span class="pill autotag">auto</span>' : ""}</div>
       <div class="date">${esc(cv.ultimo_fmt || "")}</div>` : ""}
     ${c.nota ? `<div class="nota"><b>Nota:</b> ${esc(c.nota)}</div>` : ""}
     <div class="cardacts">
@@ -108,6 +115,7 @@ function cardHTML(c) {
       <button class="ebtn" data-act="est" data-est="dijo_que_luego" data-key="${key}">Dijo que luego</button>
       <button class="ebtn" data-act="est" data-est="dijo_que_no" data-key="${key}">Dijo que no</button>
       <button class="ebtn ghost" data-act="est" data-est="" data-key="${key}" title="Quitar estado propio (volver a lo de Radar)">Auto</button>
+      <button class="ebtn ghost" data-act="soloauto" data-sa="${c.solo_auto_manual === 1 ? 0 : 1}" data-key="${key}" title="Forzar/deshacer «solo automáticas» para este cliente">${c.solo_auto_manual === 1 ? "Quitar solo auto" : "Marcar solo auto"}</button>
     </div>
     <details class="edit">
       <summary>Editar nota / fechas</summary>
@@ -162,11 +170,11 @@ function renderConv() {
   const items = S.convs.items;
   const zonas = S.state.kanban.zonas;
   const rows = items.map((it) => `<tr data-line="${esc(it.line)}" data-id="${esc(it.chat_id)}">
-      <td>${esc(it.lead_nombre || it.nombre)}</td>
+      <td>${esc(it.lead_nombre || it.nombre)}${it.solo_auto ? ' <span class="pill autotag">solo auto</span>' : ""}</td>
       <td>${lineBadge(it.line)}</td>
       <td><span class="badge ${esc(it.estado)}">${esc(nst(it.estado))}</span></td>
       <td>${esc(it.zona || "—")}</td>
-      <td class="msg">${it.desde_cliente ? "↩ " : "→ "}${esc(it.ultimo || "")}${it.media ? " [" + esc(it.media) + "]" : ""}</td>
+      <td class="msg">${it.desde_cliente ? "↩ " : "→ "}${esc(it.ultimo || "")}${it.media ? " [" + esc(it.media) + "]" : ""}${it.desde_cliente && it.ultimo_auto ? ' <span class="pill autotag">auto</span>' : ""}</td>
       <td>${esc(it.ultimo_fmt || "—")}</td>
       <td>${it.sent} / ${it.recv}</td>
       <td><button class="btn" style="padding:4px 9px">Ver hilo</button></td>
@@ -177,6 +185,7 @@ function renderConv() {
       <label class="f">Zona<select id="cZona"><option value="">Todas</option>${zonas.map((z) => `<option>${esc(z)}</option>`).join("")}</select></label>
       <span style="color:var(--dim);font-size:12.5px;margin-left:auto">${items.length} conversaciones</span>
     </div>
+    <div class="help">${ICON.info}Las respuestas automáticas de los negocios (bots de recepción) no cuentan como respuesta.</div>
     <div class="card"><div class="tblwrap"><table>
       <thead><tr><th>Negocio</th><th>Línea</th><th>Estado</th><th>Zona</th><th>Último mensaje</th><th>Cuándo</th><th>Env/Rec</th><th></th></tr></thead>
       <tbody>${rows || '<tr><td colspan="8" class="empty">Sin conversaciones</td></tr>'}</tbody></table></div></div>`;
@@ -351,6 +360,7 @@ function wire() {
   if (kq) { let h; kq.oninput = () => { clearTimeout(h); h = setTimeout(() => { S.kQ = kq.value; render(); }, 250); }; }
   document.querySelectorAll(".more").forEach((b) => b.onclick = () => { S.kShow[b.dataset.estado] = (S.kShow[b.dataset.estado] || 40) + 60; render(); });
   document.querySelectorAll(".ebtn[data-act=est]").forEach((b) => b.onclick = () => setExtra(b.dataset.key, { estado_extra: b.dataset.est }));
+  document.querySelectorAll(".ebtn[data-act=soloauto]").forEach((b) => b.onclick = () => setExtra(b.dataset.key, { solo_auto: +b.dataset.sa }));
   document.querySelectorAll(".kcard .save").forEach((b) => b.onclick = () => {
     const card = b.closest(".kcard");
     const body = { nota: card.querySelector(".notaIn").value };
@@ -381,13 +391,33 @@ async function openThread(line, id) {
   try {
     const d = await api(`/api/chat/${encodeURIComponent(line)}/${encodeURIComponent(id)}`);
     $("#dname").textContent = d.nombre || "Conversación";
-    $("#dsub").textContent = `${line} · ${d.mensajes.length} mensajes`;
+    const resumen = d.solo_auto
+      ? ` · solo automáticas (${d.auto_count} auto)`
+      : (d.human_count ? ` · ${d.human_count} humana(s) · ${d.auto_count} auto` : "");
+    $("#dsub").textContent = `${line} · ${d.mensajes.length} mensajes${resumen}`;
     if (!d.mensajes.length) { $("#thread").innerHTML = '<div class="empty">Sin mensajes almacenados</div>'; return; }
-    $("#thread").innerHTML = d.mensajes.map((m) => `<div class="bub ${m.from_me ? "out" : "in"}">
+    $("#thread").innerHTML = d.mensajes.map((m) => {
+      const esAuto = !m.from_me && m.auto;
+      const btn = m.from_me || !m.msg_id ? "" :
+        `<button class="mb ${esAuto ? "on" : ""}" data-msg="${esc(m.msg_id)}" data-to="${esAuto ? 0 : 1}" title="${esAuto ? "Marcar como respuesta real" : "Marcar como automático"}">${esAuto ? "auto · marcar real" : "marcar auto"}</button>`;
+      return `<div class="bub ${m.from_me ? "out" : "in"}">
         ${m.body ? esc(m.body) : ""}${m.media ? `<div class="md">[${esc(m.media)}]</div>` : ""}
-        <div class="tm">${esc(m.fmt || "")} ${m.from_me ? "· enviado" : "· recibido"}</div></div>`).join("");
+        <div class="tm">${esc(m.fmt || "")} ${m.from_me ? "· enviado" : "· recibido"} ${esAuto ? '<span class="pill autotag">auto</span>' : ""} ${btn}</div></div>`;
+    }).join("");
+    $("#thread").querySelectorAll(".mb").forEach((b) => b.onclick = () => clasificarMsg(b.dataset.msg, +b.dataset.to, line, id));
     $("#thread").scrollTop = $("#thread").scrollHeight;
   } catch (e) { $("#thread").innerHTML = '<div class="empty">Error al cargar el hilo</div>'; }
+}
+
+async function clasificarMsg(msgId, auto, line, id) {
+  try {
+    await api(`/api/mensaje/${encodeURIComponent(msgId)}/clasificar`, {
+      method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ auto: !!auto }),
+    });
+    toast(auto ? "Marcado como automático" : "Marcado como respuesta real");
+    await loadState();
+    await openThread(line, id);
+  } catch (e) { toast("No se pudo guardar: " + e.message); }
 }
 
 async function loadState() {

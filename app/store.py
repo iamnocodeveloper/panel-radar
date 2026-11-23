@@ -28,6 +28,9 @@ CREATE TABLE IF NOT EXISTS chats(
   last_in_body TEXT,
   last_out_body TEXT,
   responded INTEGER DEFAULT 0,
+  human_count INTEGER DEFAULT 0,
+  auto_count INTEGER DEFAULT 0,
+  last_in_auto INTEGER,
   is_prospect INTEGER DEFAULT 0,
   threaded INTEGER DEFAULT 0,
   lead_id TEXT,
@@ -42,9 +45,17 @@ CREATE TABLE IF NOT EXISTS messages(
   from_me INTEGER,
   body TEXT,
   has_media INTEGER,
-  media_type TEXT
+  media_type TEXT,
+  auto INTEGER DEFAULT 0
 );
 CREATE INDEX IF NOT EXISTS idx_messages_chat ON messages(chat_id, line, ts);
+-- Clasificación manual de un mensaje entrante (corrige la heurística). Si existe una
+-- fila aquí, MANDA sobre la columna `messages.auto`: no se vuelve a clasificar.
+CREATE TABLE IF NOT EXISTS msg_manual(
+  msg_id TEXT PRIMARY KEY,
+  es_auto INTEGER NOT NULL,
+  updated_at INTEGER
+);
 CREATE TABLE IF NOT EXISTS leads(
   id TEXT PRIMARY KEY,
   nombre TEXT,
@@ -67,9 +78,33 @@ CREATE TABLE IF NOT EXISTS clientes(
   cotizacion_enviada_el TEXT,
   estado_extra TEXT,
   nota TEXT,
+  -- Corrección manual «este cliente es solo automáticas» (manda sobre la heurística):
+  -- NULL = lo decide la heurística, 1 = marcado a mano como solo automáticas,
+  -- 0 = marcado a mano como respuesta real.
+  solo_auto INTEGER,
   updated_at INTEGER
 );
 """
+
+# Columnas añadidas después de la primera versión: se aplican con ALTER TABLE sobre la
+# base ya existente (CREATE TABLE IF NOT EXISTS no toca una tabla que ya está).
+MIGRATIONS = {
+    "messages": {"auto": "INTEGER DEFAULT 0"},
+    "chats": {
+        "human_count": "INTEGER DEFAULT 0",
+        "auto_count": "INTEGER DEFAULT 0",
+        "last_in_auto": "INTEGER",
+    },
+    "clientes": {"solo_auto": "INTEGER"},
+}
+
+
+def _migrate(conn):
+    for table, cols in MIGRATIONS.items():
+        have = {r[1] for r in conn.execute(f"PRAGMA table_info({table})")}
+        for col, ddl in cols.items():
+            if col not in have:
+                conn.execute(f"ALTER TABLE {table} ADD COLUMN {col} {ddl}")
 
 
 def connect():
@@ -81,6 +116,7 @@ def connect():
         _conn.execute("PRAGMA journal_mode=WAL")
         with _lock, _conn:
             _conn.executescript(SCHEMA)
+            _migrate(_conn)
     return _conn
 
 
@@ -124,6 +160,7 @@ CLIENTE_FIELDS = (
     "cotizacion_enviada_el",
     "estado_extra",
     "nota",
+    "solo_auto",
 )
 
 
@@ -141,14 +178,15 @@ def cliente_all():
 def _cliente_write(key, row):
     execute(
         """INSERT INTO clientes(key,nombre,interesado_el,demo_enviado_el,cotizacion_enviada_el,
-                estado_extra,nota,updated_at)
+                estado_extra,nota,solo_auto,updated_at)
            VALUES(:key,:nombre,:interesado_el,:demo_enviado_el,:cotizacion_enviada_el,
-                :estado_extra,:nota,:updated_at)
+                :estado_extra,:nota,:solo_auto,:updated_at)
            ON CONFLICT(key) DO UPDATE SET
                 nombre=excluded.nombre, interesado_el=excluded.interesado_el,
                 demo_enviado_el=excluded.demo_enviado_el,
                 cotizacion_enviada_el=excluded.cotizacion_enviada_el,
                 estado_extra=excluded.estado_extra, nota=excluded.nota,
+                solo_auto=excluded.solo_auto,
                 updated_at=excluded.updated_at""",
         row,
     )
